@@ -2,7 +2,7 @@
   {
     "name": "laytime-statement",
     "title": "DRAFT: Laytime statement",
-    "for_each": "select p.id,p.code from port_calls p join latest_calculations c on c.port_id=p.id where p.reviewed and c.revision=p.revision and c.direction<>'REVIEW' order by p.code",
+    "for_each": "select p.id,p.code from port_calls p join latest_calculations c on c.port_id=p.id where p.superseded_by is null and p.reviewed and c.revision=p.revision and c.direction<>'REVIEW' order by p.code",
     "file": "code",
     "sections": [
       {
@@ -39,7 +39,7 @@
       },
       {
         "title": "Current position",
-        "sql": "select r.* from claim_round r join voyages v on r.voyage=v.code where v.id=$1"
+        "sql": "select r.port,r.currency,r.direction,r.amount_cents,r.current_calculation from claim_round r join voyages v on r.voyage=v.code where v.id=$1"
       },
       {
         "title": "Evidence already recorded",

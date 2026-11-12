@@ -4,8 +4,8 @@
     "title": "Laytime claim round",
     "sections": [
       {
-        "title": "Current reviewed calculations",
-        "sql": "select * from claim_round order by voyage,port"
+        "title": "Port calls and reviewed amounts",
+        "sql": "select voyage,port,owner,currency,direction,amount_cents,current_calculation from claim_round order by voyage,port"
       },
       {
         "title": "Claim deadlines",

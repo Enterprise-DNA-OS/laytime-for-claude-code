@@ -50,7 +50,7 @@ try{
  // Optional local proof uses an actual vendor export fetched separately this run.
  if(process.env.LAYTIME_VENDOR_SAMPLE){const real=await readStatement(process.env.LAYTIME_VENDOR_SAMPLE);eq(real.parsed.events.length,9);eq(real.parsed.allowed_minutes,4320);eq(real.parsed.port,'Rotterdam, Netherlands');}
  throws(()=>minute('2026-01-01T24:00:00Z'),/clock/);
- db=await getDb();eq((await migrate(db)).ran.length,4);eq((await migrate(db)).ran.length,0);await seed(db);
+ db=await getDb();eq((await migrate(db)).ran.length,5);eq((await migrate(db)).ran.length,0);await seed(db);
  const auditCount=(await db.query('select count(*)::int n from audit_log'))[0].n;await seed(db);eq((await db.query('select count(*)::int n from audit_log'))[0].n,auditCount);
  for(const cmd of Object.keys(reads))ok(Array.isArray(await call(cmd)),cmd);
  const round=await call('claim-round');eq(round.find(x=>x.port==='Tauranga').amount_cents,900000);eq(round.find(x=>x.port==='Napier').amount_cents,300000);
@@ -93,9 +93,15 @@ try{
  const altered=path.join(tmp,'second.pdf');fs.writeFileSync(altered,makePdf(statementLines.map(x=>x.replace('Example Imported','Example Changed'))));
  await bad(()=>call(...args.map(a=>a.startsWith('--file=')?'--file='+altered:a)),/unique/);eq((await db.query('select count(*)::int n from imports'))[0].n,1);
  await bad(()=>write('calculate',{port:'IMPORTED'}),/Review/);
+ await call(...args.map(a=>a.startsWith('--file=')?'--file='+altered:a==='--code=IMPORTED'?'--code=IMPORTED-R2':a));
+ await bad(()=>write('supersede-call',{port:'IMPORTED',replacement:'DEMO-FREMANTLE',reference:'Wrong voyage'}),/same voyage/);
+ await write('supersede-call',{port:'IMPORTED',replacement:'IMPORTED-R2',reference:'Verified replacement statement'});
+ await bad(()=>write('supersede-call',{port:'IMPORTED-R2',replacement:'IMPORTED',reference:'Cycle'}),/active call/);
+ await bad(()=>write('review-call',{port:'IMPORTED',reference:'Old'}),/superseded/);
+ ok(!(await call('attention')).some(r=>r.port_call==='IMPORTED'));
  await bad(()=>call('claim-round','--typo'),/Unknown flag/);
  await bad(()=>call('claim-round','--dry-run=false'),/switch/);
- const exp=(await call('export','--out=archive'))[0];const archive=JSON.parse(fs.readFileSync(exp.file));eq(Object.keys(archive.tables).length,10);eq(archive.tables.source_events.length,5);eq(archive.tables.exception_voids.length,1);
+ const exp=(await call('export','--out=archive'))[0];const archive=JSON.parse(fs.readFileSync(exp.file));eq(Object.keys(archive.tables).length,10);eq(archive.tables.source_events.length,8);eq(archive.tables.exception_voids.length,1);
  await bad(()=>call('export','--out=archive'),/already exists/);await bad(()=>call('export','--out=../../escape'),/Code needs/);
  ok(format(round).includes('USD 9000.00'));
  await db.close();db=null;

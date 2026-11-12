@@ -9,12 +9,12 @@ import { page, table, record, writeOut } from './lib/render.mjs';
 
 export const reads={
  voyages:'select code,name,vessel,counterparty,owner,status,time_bar_at from voyages order by code',
- calls:'select p.code,v.code voyage,p.name,p.currency,p.reviewed,p.revision from port_calls p join voyages v on v.id=p.voyage_id order by p.code',
+ calls:'select p.code,v.code voyage,p.name,p.currency,p.reviewed,p.revision,p.superseded_by from port_calls p join voyages v on v.id=p.voyage_id order by p.code',
  'claim-round':'select voyage,port,owner,currency,direction,amount_cents,current_calculation from claim_round order by voyage,port',
  'time-bars':'select * from time_bars order by time_bar_at nulls first',
- unreviewed:'select v.code voyage,p.code port_call,p.name,p.contract_ref,p.nor_ref from port_calls p join voyages v on v.id=p.voyage_id where not p.reviewed and v.status=\'open\' order by p.code',
+ unreviewed:'select v.code voyage,p.code port_call,p.name,p.contract_ref,p.nor_ref from port_calls p join voyages v on v.id=p.voyage_id where not p.reviewed and p.superseded_by is null and v.status=\'open\' order by p.code',
  'stale-claims':`select v.code,v.vessel,v.owner,greatest(v.updated_at,coalesce(n.at,v.updated_at),coalesce(c.at,v.updated_at)) last_activity from voyages v left join (select voyage_id,max(created_at) at from notes group by voyage_id) n on n.voyage_id=v.id left join (select voyage_id,max(occurred_at) at from claim_records group by voyage_id)c on c.voyage_id=v.id where v.status='open' and greatest(v.updated_at,coalesce(n.at,v.updated_at),coalesce(c.at,v.updated_at))<now()-interval '14 days' order by last_activity`,
- 'owner-workload':`select v.owner,count(distinct v.id)::int open_voyages,count(distinct p.id) filter(where not p.reviewed)::int unreviewed_calls,count(distinct v.id) filter(where v.time_bar_at<now())::int past_deadline from voyages v left join port_calls p on p.voyage_id=v.id where v.status='open' group by v.owner order by v.owner`,
+ 'owner-workload':`select v.owner,count(distinct v.id)::int open_voyages,count(distinct p.id) filter(where not p.reviewed)::int unreviewed_calls,count(distinct v.id) filter(where v.time_bar_at<now())::int past_deadline from voyages v left join port_calls p on p.voyage_id=v.id and p.superseded_by is null where v.status='open' group by v.owner order by v.owner`,
  'counterparty-exposure':`select counterparty,currency,direction,sum(amount_cents)::bigint amount_cents,count(*)::int calls from claim_round where current_calculation and status='open' group by counterparty,currency,direction order by counterparty,currency,direction`,
  'port-delays':`select r.port,r.currency,c.demurrage_minutes,c.excluded_minutes,c.saved_minutes from claim_round r join port_calls p on p.code=r.port_call join latest_calculations c on c.port_id=p.id where r.current_calculation order by c.demurrage_minutes desc,r.port`,
  exceptions:'select p.code port_call,e.starts_at,e.ends_at,e.reason,e.clause_ref,e.on_demurrage from exceptions e join port_calls p on p.id=e.port_id order by p.code,e.starts_at',
@@ -26,7 +26,7 @@ export const reads={
  notes:'select v.code voyage,n.body,n.actor,n.created_at from notes n join voyages v on v.id=n.voyage_id order by n.created_at',
  claims:'select v.code voyage,c.kind,c.occurred_at,c.reference,c.actor from claim_records c join voyages v on v.id=c.voyage_id order by c.occurred_at'
 };
-const mutations=['add-voyage','add-call','set-terms','add-exception','void-exception','review-call','calculate','log','record-claim','set-deadline','close','import'];
+const mutations=['add-voyage','add-call','set-terms','add-exception','void-exception','supersede-call','review-call','calculate','log','record-claim','set-deadline','close','import'];
 export const commandNames=[...Object.keys(reads),'voyage','port',...mutations,'weekly-review','draft-statement','draft-claim','export','help'];
 function options(argv){const positional=[],flags={};for(const a of argv){if(!a.startsWith('--')){positional.push(a);continue;}const n=a.indexOf('=');const k=a.slice(2,n<0?undefined:n);if(k in flags)throw Error('Duplicate flag '+k);flags[k]=n<0?true:a.slice(n+1);}return {positional,flags};}
 const required=(o,k)=>{if(typeof o[k]!=='string'||!o[k].trim())throw Error(`--${k} is required`);return o[k].trim();};
@@ -59,8 +59,13 @@ async function mutate(db,cmd,o,pos){
   const v=await resolve(db,'voyages',required(o,'voyage'));await openVoyage(db,v);
   return db.query('insert into port_calls(code,voyage_id,name,currency) values($1,$2,$3,$4) returning code,name,reviewed',[code(required(o,'code')),v,required(o,'name'),currency(required(o,'currency'))]);
  }
- if(['set-terms','add-exception','void-exception','review-call','calculate'].includes(cmd)){
+ if(['set-terms','add-exception','void-exception','supersede-call','review-call','calculate'].includes(cmd)){
   const {p,exceptions}=await portData(db,required(o,'port'),true);await openVoyage(db,p.voyage_id);
+  if(p.superseded_by)throw Error('Port call has been superseded');
+  if(cmd==='supersede-call'){
+   const replacement=await resolve(db,'port_calls',required(o,'replacement'));
+   return db.query('update port_calls set superseded_by=$2,superseded_ref=$3 where id=$1 returning code,superseded_by,superseded_ref',[p.id,replacement,required(o,'reference')]);
+  }
   if(cmd==='void-exception'){
    const ref=required(o,'exception').toLowerCase(),matches=exceptions.filter(e=>e.id.toLowerCase().startsWith(ref));
    if(matches.length!==1)throw Error('Exception reference must match one active row. Candidates: '+exceptions.map(e=>e.id+' '+e.reason).join(', '));
@@ -97,8 +102,8 @@ async function mutate(db,cmd,o,pos){
    return db.query('insert into claim_records(voyage_id,kind,occurred_at,reference,actor) values($1,$2,$3,$4,$5) returning id,kind,reference',[id,kind,at,required(o,'reference'),actor]);
   }
   if(cmd==='set-deadline')return db.query('update voyages set time_bar_at=$2,deadline_ref=$3 where id=$1 returning code,time_bar_at',[id,timestamp(required(o,'at')),required(o,'reference')]);
-  const gaps=await db.query(`select p.id from port_calls p left join latest_calculations c on c.port_id=p.id where p.voyage_id=$1 and (not p.reviewed or c.id is null or c.revision<>p.revision or c.direction='REVIEW')`,[id]);
-  const count=await db.query('select id from port_calls where voyage_id=$1',[id]);
+  const gaps=await db.query(`select p.id from port_calls p left join latest_calculations c on c.port_id=p.id where p.voyage_id=$1 and p.superseded_by is null and (not p.reviewed or c.id is null or c.revision<>p.revision or c.direction='REVIEW')`,[id]);
+  const count=await db.query('select id from port_calls where voyage_id=$1 and superseded_by is null',[id]);
   const agreement=await db.query("select id from claim_records where voyage_id=$1 and kind='agreed'",[id]);
   if(gaps.length||!count.length||!agreement.length)throw Error('Closure needs current reviewed calculations and recorded agreement evidence');
   return db.query("update voyages set status='closed',closed_ref=$2 where id=$1 returning code,status",[id,required(o,'reference')]);
@@ -120,7 +125,7 @@ async function mutate(db,cmd,o,pos){
 const exportTables=['voyages','port_calls','exceptions','exception_voids','source_events','calculations','imports','notes','claim_records','audit_log'];
 export async function run(db,argv){
  const {positional,flags:o}=options(argv),cmd=positional.shift()||'help';
- const known=new Set(['json','dry-run','actor','code','name','vessel','counterparty','owner','time-bar-at','deadline-ref','voyage','currency','port','commenced','completed','allowed-minutes','demurrage-rate','despatch-rate','contract-ref','nor-ref','from','to','reason','clause-ref','on-demurrage','exception','reference','body','kind','at','file','out']);
+ const known=new Set(['json','dry-run','actor','code','name','vessel','counterparty','owner','time-bar-at','deadline-ref','voyage','currency','port','commenced','completed','allowed-minutes','demurrage-rate','despatch-rate','contract-ref','nor-ref','from','to','reason','clause-ref','on-demurrage','exception','replacement','reference','body','kind','at','file','out']);
  for(const k of Object.keys(o))if(!known.has(k))throw Error('Unknown flag --'+k);
  for(const k of ['json','dry-run'])if(k in o&&o[k]!==true)throw Error('--'+k+' is a switch, not a value');
  if(cmd in reads)return db.query(reads[cmd]);
@@ -141,7 +146,7 @@ export async function run(db,argv){
     title='DRAFT: Weekly laytime review';sections=[];for(const key of ['claim-round','attention','time-bars'])sections.push({title:key.replaceAll('-',' '),html:table(await run(db,[key]))});
    }else{
     const {p,exceptions}=await portData(db,positional[0]);const c=(await db.query('select * from latest_calculations where port_id=$1',[p.id]))[0];
-    if(!p.reviewed||!c||c.revision!==p.revision||c.direction==='REVIEW')throw Error('Draft needs a current reviewed calculation with an agreed rate');
+    if(p.superseded_by||!p.reviewed||!c||c.revision!==p.revision||c.direction==='REVIEW')throw Error('Draft needs a current reviewed calculation with an agreed rate');
     title=`DRAFT: ${cmd==='draft-claim'?'Demurrage or despatch claim working paper':'Laytime statement'} ${p.code}`;
     sections=[{title:'Reviewed terms',html:record(p,['code','name','currency','allowed_minutes','commenced_at','completed_at','contract_ref','nor_ref','reviewer','review_ref'])},{title:'Calculation',html:record(c,['direction','amount_cents','used_minutes','excluded_minutes','demurrage_minutes','saved_minutes'])},{title:'Interval ledger',html:table(c.intervals)},{title:'Exceptions',html:table(exceptions,['starts_at','ends_at','reason','clause_ref','on_demurrage'])}];
    }

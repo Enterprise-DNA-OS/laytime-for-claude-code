@@ -27,7 +27,7 @@ Compare the parsed event count, port and source terms with the PDF. Repeat the i
 | Weekend rule and laytime type | Preserved in the parsed source archive, not automatically applied |
 | Complete original PDF and extracted text | Retained with a SHA-256 hash in the import archive |
 
-The importer reconciles the stated event count, rejects duplicate event IDs, and rejects a malformed or unsupported layout. The original file's hash makes a repeat import a no-op. A different file using an existing call code fails and rolls back every new record. To retain a revised vendor statement, choose a new call code, identify it as a revision, and resolve which call represents the operational position before aggregating reports.
+The importer reconciles the stated event count, rejects duplicate event IDs, and rejects a malformed or unsupported layout. The original file's hash makes a repeat import a no-op. A different file using an existing call code fails and rolls back every new record. To retain a revised vendor statement, import it under a new call code, then run supersede-call with the old port, replacement code, evidence reference and actor. Both statements stay in history; only the replacement enters the current claim round. Replacements must be active calls on the same voyage, and cycles are rejected.
 
 ## Review after import
 

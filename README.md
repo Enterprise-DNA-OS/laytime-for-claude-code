@@ -66,6 +66,7 @@ The one CLI is npm run laytime -- followed by a command. Add --json for machines
 | /add-call | Register a separately settled port call. |
 | /set-terms | Record reviewed evidence for a fixed allowance and separate port settlement. Provide the agreed commencement, completion, NOR evidence and working-time-saved despatch rate. Omitting despatch-rate leaves it unknown. Changes invalidate approval. |
 | /add-exception | Add a non-overlapping time exclusion supported by the actual charter clause. on-demurrage is false unless that clause expressly excludes the period on demurrage. Every addition invalidates review. |
+| /supersede-call | Replace an old statement with a verified revised call on the same voyage. Original evidence stays, and only the replacement enters the current claim round. |
 | /void-exception | Correct an erroneous exclusion by appending a void record. The original stays in history. Read port to obtain its identifier, record the correction reason, then add any replacement and re-review. |
 | /review-call | Confirm the operator has checked the charter, valid NOR, commencement, completion, every exclusion and the fixed allowance. Only separate-port, whole-minute calculations and working-time-saved despatch are supported. Do not approve reversible, averaged, fractional or all-time-saved calculations. |
 | /calculate | Save a new calculation from the current reviewed revision. Show the interval ledger and direction. A later edit invalidates it. |
