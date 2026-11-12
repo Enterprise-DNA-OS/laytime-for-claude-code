@@ -1,0 +1,107 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { getDb, REPO_ROOT } from './lib/db.mjs';
+import { migrate } from './migrate.mjs';
+import { seed } from './seed.mjs';
+import { calculate, minute, cents } from './lib/calculate.mjs';
+import { parseStatement, readStatement } from './lib/layline-import.mjs';
+import { run, reads, format, resolve } from './laytime.mjs';
+import { makePdf, statementLines } from '../tests/fixtures/statement.mjs';
+
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'laytime-smoke-'));
+process.env.DATA_DIR=path.join(tmp,'db');process.env.OUTPUT_DIR=tmp;
+process.env.DATABASE_URL=process.env.LAYTIME_TEST_POSTGRES_URL||'';
+let db,checks=0;
+const eq=(a,b)=>{assert.deepEqual(a,b);checks++;};
+const ok=(a,msg)=>{assert.ok(a,msg);checks++;};
+const bad=async(fn,re)=>{await assert.rejects(fn,re);checks++;};
+const throws=(fn,re)=>{assert.throws(fn,re);checks++;};
+const call=(...a)=>run(db,a);
+const write=(cmd,o)=>run(db,[cmd,...Object.entries({actor:'Test Operator',...o}).map(([k,v])=>`--${k}=${v}`)]);
+const p={currency:'USD',allowed_minutes:1440,demurrage_rate_cents:240000,despatch_rate_cents:120000,commenced_at:'2026-01-01T00:00:00Z',completed_at:'2026-01-03T00:00:00Z'};
+try{
+ // Independently specified settlement examples and boundary conditions.
+ eq(calculate(p).amount_cents,240000);eq(calculate(p).demurrage_minutes,1440);
+ eq(calculate({...p,completed_at:'2026-01-01T12:00:00Z'}).amount_cents,60000);
+ eq(calculate({...p,completed_at:'2026-01-02T00:00:00Z'}).direction,'BALANCED');
+ eq(calculate({...p,despatch_rate_cents:null,completed_at:'2026-01-01T12:00:00Z'}).direction,'REVIEW');
+ eq(calculate({...p,demurrage_rate_cents:100,completed_at:'2026-01-02T00:10:00Z'}).amount_cents,1);
+ const early={starts_at:'2026-01-01T06:00:00Z',ends_at:'2026-01-01T12:00:00Z',reason:'rain',on_demurrage:false};
+ eq(calculate(p,[early]).demurrage_minutes,1080);eq(calculate(p,[early]).amount_cents,180000);
+ const late={...early,starts_at:'2026-01-02T08:00:00Z',ends_at:'2026-01-02T12:00:00Z'};
+ eq(calculate(p,[late]).demurrage_minutes,1440);eq(calculate(p,[{...late,on_demurrage:true}]).demurrage_minutes,1200);
+ // An exclusion while allowance is still available cannot itself exhaust it.
+ const straddle={...early,starts_at:'2026-01-01T23:00:00Z',ends_at:'2026-01-02T02:00:00Z'};
+ eq(calculate(p,[straddle]).demurrage_minutes,1260);
+ const ledger=calculate(p,[early,late]);eq(ledger.intervals.reduce((s,r)=>s+r.minutes,0),2880);
+ eq(ledger.used_minutes+ledger.excluded_minutes,2880);
+ eq(calculate({...p,allowed_minutes:0},[{...early,on_demurrage:true}]).demurrage_minutes,2520);
+ throws(()=>calculate(p,[early,early]),/overlap/);throws(()=>calculate(p,[{...early,ends_at:'2026-01-04T00:00:00Z'}]),/inside/);
+ eq(minute('2026-01-01T13:00:00+13:00'),minute('2026-01-01T00:00:00Z'));
+ throws(()=>minute('2026-02-30T00:00:00Z'),/calendar/);throws(()=>minute('2026-01-01T00:00:01Z'),/whole minutes/);throws(()=>minute('2026-01-01T00:00:00'),/timezone/);
+ eq(cents('123.45'),12345);throws(()=>cents('1.001'),/two decimals/);throws(()=>cents('-1'),/nonnegative/);
+ const parsed=parseStatement(statementLines.join('\n'));eq(parsed.events.length,3);eq(parsed.allowed_minutes,2880);
+ throws(()=>parseStatement(statementLines.join('\n').replace('Events 3','Events 4')),/reconciliation/);
+ throws(()=>parseStatement(statementLines.join('\n').replace('E2 ','E1 ')),/Duplicate/);
+ const fixture=path.join(tmp,'statement.pdf');fs.writeFileSync(fixture,makePdf());eq((await readStatement(fixture)).parsed.events.length,3);
+ // Optional local proof uses an actual vendor export fetched separately this run.
+ if(process.env.LAYTIME_VENDOR_SAMPLE){const real=await readStatement(process.env.LAYTIME_VENDOR_SAMPLE);eq(real.parsed.events.length,9);eq(real.parsed.allowed_minutes,4320);eq(real.parsed.port,'Rotterdam, Netherlands');}
+ throws(()=>minute('2026-01-01T24:00:00Z'),/clock/);
+ db=await getDb();eq((await migrate(db)).ran.length,4);eq((await migrate(db)).ran.length,0);await seed(db);
+ const auditCount=(await db.query('select count(*)::int n from audit_log'))[0].n;await seed(db);eq((await db.query('select count(*)::int n from audit_log'))[0].n,auditCount);
+ for(const cmd of Object.keys(reads))ok(Array.isArray(await call(cmd)),cmd);
+ const round=await call('claim-round');eq(round.find(x=>x.port==='Tauranga').amount_cents,900000);eq(round.find(x=>x.port==='Napier').amount_cents,300000);
+ ok((await call('attention')).some(x=>x.issue.includes('passed')));eq((await call('stale-claims')).length,2);
+ eq(await resolve(db,'port_calls','tauranga'),await resolve(db,'port_calls','demo-tauranga'));
+ await bad(()=>resolve(db,'voyages','DEMO'),/Ambiguous.*DEMO-HARBOUR.*DEMO-PACIFIC.*DEMO-SOUTH/);
+ await bad(()=>resolve(db,'port_calls','missing'),/Unknown.*Candidates/);
+ eq((await call('voyage','DEMO-PACIFIC'))[0].calls.length,2);ok((await call('port','DEMO-TAURANGA'))[0].calculations.length===1);
+ ok((await call('help'))[0].commands.includes('void-exception'));await bad(()=>call('unknown'),/Unknown command/);
+ await bad(()=>call('add-voyage','--code=X'),/actor/);
+ await bad(()=>write('calculate',{port:'DEMO-FREMANTLE'}),/Review/);
+ await write('add-voyage',{code:'TEST',name:'Test <script>alert(1)</script>',vessel:'Fictional Test',counterparty:'Example',owner:'Alex'});
+ await write('add-call',{code:'TEST-CALL',voyage:'TEST',name:'Test <script>alert(1)</script>',currency:'USD'});
+ const terms={port:'TEST-CALL',commenced:'2026-01-01T00:00:00Z',completed:'2026-01-03T00:00:00Z','allowed-minutes':1440,'demurrage-rate':'2400','despatch-rate':'1200','contract-ref':'Test contract fixed allowance, separate port, working time saved','nor-ref':'Test NOR review'};
+ await write('set-terms',terms);await write('review-call',{port:'TEST-CALL',reference:'Test review'});
+ eq((await write('calculate',{port:'TEST-CALL'}))[0].amount_cents,240000);
+ const ex=(await write('add-exception',{port:'TEST-CALL',from:'2026-01-01T06:00:00Z',to:'2026-01-01T12:00:00Z',reason:'Rain test','clause-ref':'Test clause'}))[0];
+ await bad(()=>write('calculate',{port:'TEST-CALL'}),/Review/);
+ eq((await call('claim-round')).find(r=>r.port.includes('Test')).amount_cents,null);
+ eq((await call('claim-round')).find(r=>r.port.includes('Test')).direction,null);
+ await bad(()=>write('add-exception',{port:'TEST-CALL',from:'2026-01-01T07:00:00Z',to:'2026-01-01T08:00:00Z',reason:'Overlap','clause-ref':'Test clause'}),/overlap/);
+ await write('review-call',{port:'TEST-CALL',reference:'Re-reviewed'});eq((await write('calculate',{port:'TEST-CALL'}))[0].amount_cents,180000);
+ await write('void-exception',{port:'TEST-CALL',exception:ex.id.slice(0,8),reason:'Original weather record corrected'});
+ await write('review-call',{port:'TEST-CALL',reference:'Corrected reviewed'});eq((await write('calculate',{port:'TEST-CALL'}))[0].amount_cents,240000);
+ await write('set-deadline',{voyage:'TEST',at:'2026-12-20T17:00:00+13:00',reference:'Test charter deadline'});
+ await write('log',{voyage:'TEST',body:'Factual follow-up recorded'});
+ await bad(()=>write('close',{voyage:'TEST',reference:'Premature'}),/agreement/);
+ const at=new Date(Math.floor(Date.now()/60000)*60000).toISOString();
+ await bad(()=>write('record-claim',{voyage:'TEST',kind:'submitted',at:'2999-01-01T00:00:00Z',reference:'future'}),/future/);
+ for(const kind of ['submitted','disputed','agreed'])await write('record-claim',{voyage:'TEST',kind,at,reference:'Test evidence '+kind});
+ for(const c of ['weekly-review','draft-statement','draft-claim']){const result=await call(c,'TEST-CALL');ok(fs.readFileSync(result[0].file,'utf8').includes('DRAFT'));}
+ await write('close',{voyage:'TEST',reference:'Test closure sign-off'});
+ await bad(()=>write('log',{voyage:'TEST',body:'after closed'}),/closed/);
+ await bad(()=>write('set-terms',terms),/closed/);
+ await bad(()=>db.exec('delete from audit_log'),/append-only/);await bad(()=>db.exec("update notes set body='changed'"),/append-only/);
+ const args=['import','layline','--file='+fixture,'--voyage=DEMO-PACIFIC','--code=IMPORTED','--currency=USD','--actor=Importer'];
+ await call(...args,'--dry-run');eq((await db.query('select count(*)::int n from imports'))[0].n,0);
+ const imported=await call(...args);eq(imported[0].events,3);eq(imported[0].reviewed,false);eq((await call(...args))[0].duplicate,true);
+ const original=(await db.query('select original_base64 from imports'))[0];eq(Buffer.from(original.original_base64,'base64'),fs.readFileSync(fixture));
+ const altered=path.join(tmp,'second.pdf');fs.writeFileSync(altered,makePdf(statementLines.map(x=>x.replace('Example Imported','Example Changed'))));
+ await bad(()=>call(...args.map(a=>a.startsWith('--file=')?'--file='+altered:a)),/unique/);eq((await db.query('select count(*)::int n from imports'))[0].n,1);
+ await bad(()=>write('calculate',{port:'IMPORTED'}),/Review/);
+ await bad(()=>call('claim-round','--typo'),/Unknown flag/);
+ await bad(()=>call('claim-round','--dry-run=false'),/switch/);
+ const exp=(await call('export','--out=archive'))[0];const archive=JSON.parse(fs.readFileSync(exp.file));eq(Object.keys(archive.tables).length,10);eq(archive.tables.source_events.length,5);eq(archive.tables.exception_voids.length,1);
+ await bad(()=>call('export','--out=archive'),/already exists/);await bad(()=>call('export','--out=../../escape'),/Code needs/);
+ ok(format(round).includes('USD 9000.00'));
+ await db.close();db=null;
+ for(const script of ['view','docs']){const result=spawnSync(process.execPath,[`scripts/${script}.mjs`],{cwd:REPO_ROOT,env:process.env,encoding:'utf8'});eq(result.status,0);}
+ const html=fs.readFileSync(path.join(tmp,'views','week.html'),'utf8');ok(html.includes('&lt;script&gt;'));ok(!html.includes('<script>alert'));
+ const cli=spawnSync(process.execPath,['scripts/laytime.mjs','claim-round','--json'],{cwd:REPO_ROOT,env:process.env,encoding:'utf8'});eq(cli.status,0);ok(JSON.parse(cli.stdout).length===6);
+ const ambiguous=spawnSync(process.execPath,['scripts/laytime.mjs','voyage','DEMO'],{cwd:REPO_ROOT,env:process.env,encoding:'utf8'});eq(ambiguous.status,1);ok(ambiguous.stderr.includes('Ambiguous'));
+ console.log(`PASS: ${checks} assertions; all reads and mutations, exact settlement cases, PDF import, rollback, source archive, corrections, rendered documents and CLI (${process.env.LAYTIME_TEST_POSTGRES_URL?'PostgreSQL':'PGlite'}).`);
+}finally{if(db)await db.close();fs.rmSync(tmp,{recursive:true,force:true});}

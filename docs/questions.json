@@ -1,0 +1,42 @@
+[
+  {
+    "question": "Which claims have a deadline within fourteen days or no deadline at all?",
+    "command": "node scripts/laytime.mjs time-bars"
+  },
+  {
+    "question": "Which port calls still need a contract review?",
+    "command": "node scripts/laytime.mjs unreviewed"
+  },
+  {
+    "question": "What amounts are currently calculated for each counterparty and currency?",
+    "command": "node scripts/laytime.mjs counterparty-exposure"
+  },
+  {
+    "question": "Which reviewed ports used the most demurrage time?",
+    "command": "node scripts/laytime.mjs port-delays"
+  },
+  {
+    "question": "Which owners have the most unreviewed calls and past deadlines?",
+    "command": "node scripts/laytime.mjs owner-workload"
+  },
+  {
+    "question": "Which open voyages have had no follow-up for fourteen days?",
+    "command": "node scripts/laytime.mjs stale-claims"
+  },
+  {
+    "question": "Which exclusions apply after the allowance is exhausted?",
+    "command": "node scripts/laytime.mjs exceptions"
+  },
+  {
+    "question": "What events did the imported statement actually contain?",
+    "command": "node scripts/laytime.mjs events"
+  },
+  {
+    "question": "Which calculations became stale after a correction?",
+    "command": "node scripts/laytime.mjs attention"
+  },
+  {
+    "question": "What submission or agreement evidence is recorded for this voyage?",
+    "command": "node scripts/laytime.mjs voyage DEMO-PACIFIC"
+  }
+]

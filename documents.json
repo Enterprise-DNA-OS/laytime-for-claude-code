@@ -1,11 +1,55 @@
 [
   {
-    "name": "example",
-    "title": "TODO(author): the first document this industry must produce",
-    "for_each": "select gen_random_uuid() as id, 'Example' as name",
-    "file": "name",
+    "name": "laytime-statement",
+    "title": "DRAFT: Laytime statement",
+    "for_each": "select p.id,p.code from port_calls p join latest_calculations c on c.port_id=p.id where p.reviewed and c.revision=p.revision and c.direction<>'REVIEW' order by p.code",
+    "file": "code",
     "sections": [
-      { "title": "Details", "sql": "select 'replace me' as item, $1::text as record_id" }
+      {
+        "title": "Reviewed contract and commencement",
+        "layout": "record",
+        "sql": "select code,name,currency,allowed_minutes,commenced_at,completed_at,contract_ref,nor_ref,reviewer,review_ref from port_calls where id=$1"
+      },
+      {
+        "title": "Calculation for review",
+        "note": "Working-time-saved despatch only. Separately settled port call. No claim has been sent or lodged.",
+        "layout": "record",
+        "sql": "select currency,direction,amount_cents,used_minutes,excluded_minutes,demurrage_minutes,saved_minutes from latest_calculations where port_id=$1"
+      },
+      {
+        "title": "Interval ledger",
+        "sql": "select x->>'from' starts_at,x->>'to' ends_at,x->>'minutes' minutes,x->>'kind' kind,x->>'reason' reason from latest_calculations c, jsonb_array_elements(c.intervals) x where c.port_id=$1"
+      },
+      {
+        "title": "Reviewed exceptions",
+        "sql": "select starts_at,ends_at,reason,clause_ref,on_demurrage from active_exceptions where port_id=$1 order by starts_at"
+      }
+    ]
+  },
+  {
+    "name": "claim-dossier",
+    "title": "DRAFT: Claim evidence dossier",
+    "for_each": "select id,code from voyages order by code",
+    "file": "code",
+    "sections": [
+      {
+        "title": "Voyage and deadline",
+        "layout": "record",
+        "sql": "select code,vessel,counterparty,owner,status,time_bar_at,deadline_ref from voyages where id=$1"
+      },
+      {
+        "title": "Current position",
+        "sql": "select r.* from claim_round r join voyages v on r.voyage=v.code where v.id=$1"
+      },
+      {
+        "title": "Evidence already recorded",
+        "note": "Evidence references are recorded by the operator and are not independently authenticated.",
+        "sql": "select kind,occurred_at,reference,actor from claim_records where voyage_id=$1 order by occurred_at"
+      },
+      {
+        "title": "Follow-up notes",
+        "sql": "select body,actor,created_at from notes where voyage_id=$1 order by created_at"
+      }
     ]
   }
 ]

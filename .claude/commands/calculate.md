@@ -1,0 +1,12 @@
+---
+description: Save a new calculation from the current reviewed revision
+---
+# Calculate
+
+Save a new calculation from the current reviewed revision. Show the interval ledger and direction. A later edit invalidates it.
+
+```bash
+node scripts/laytime.mjs calculate --port=<port> --actor="<operator>"
+```
+
+Replace angle-bracket values with verified records. Quote names and evidence references. Timestamps use whole minutes and an explicit timezone, for example 2026-11-12T17:00:00+13:00. Add --json for structured output. A unique code, ID prefix or case-insensitive name identifies a record. If ambiguous, list candidates and let the operator identify the record. Never invent a value. Read the result and present the material finding. Never send or publish.
